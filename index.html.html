@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Penales 8-Bits | CTR Scientific</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background-color: #0f172a;
+            color: white;
+            font-family: 'Courier New', Courier, monospace;
+            touch-action: manipulation;
+            overflow-y: auto;
+        }
+        #gameCanvas {
+            background-color: #22c55e; /* Verde cancha */
+            box-shadow: 0 0 20px rgba(59, 130, 246, 0.5);
+            border-radius: 8px;
+            image-rendering: pixelated;
+        }
+    </style>
+</head>
+<body class="flex flex-col items-center justify-center min-h-screen p-4">
+
+    <div class="mb-4 text-center">
+        <img src="https://ctrscientific.com/cdn/shop/files/CTRScientific_Logo_2025_165x@2x.png?v=1753460707" style="margin: 0px auto; width: 200px; text-align: center" alt="CTR Logo">
+        <h1 class="text-3xl font-bold text-blue-400 mb-2">Tanda de Penales</h1>
+        <div class="flex justify-between w-full max-w-md px-2 text-sm md:text-base font-bold bg-gray-800 p-2 rounded">
+            <span class="text-green-400">Goles: <span id="scoreGoals">0</span></span>
+            <span class="text-red-400">Fallos: <span id="scoreMisses">0</span></span>
+            <span class="text-yellow-400">Faltan: <span id="scoreRemaining">5</span></span>
+        </div>
+    </div>
+
+    <div class="relative">
+        <canvas id="gameCanvas" width="380" height="420"></canvas>
+        
+        <div id="overlay" class="absolute inset-0 bg-black bg-opacity-80 flex flex-col items-center justify-center rounded-lg z-10">
+            <h2 id="overlayTitle" class="text-4xl font-bold text-white mb-4 text-center">LISTO</h2>
+            <p id="overlayText" class="text-gray-300 mb-6 text-center px-4">Usa las flechas (◀ / ▶) o los<br>botones para elegir a dónde tirar.</p>
+            <p id="promoMessage" class="text-green-400 font-bold mb-6 text-center px-4 hidden"></p>
+            <button id="startBtn" class="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded border-b-4 border-blue-800 active:border-b-0 active:translate-y-1">
+                Iniciar Tanda
+            </button>
+        </div>
+    </div>
+    
+    <div class="mt-4 text-gray-400 text-sm text-center max-w-md">
+        <p>⚽ Engaña al portero y anota la mayor cantidad de goles en 5 intentos.</p>
+    </div>
+
+    <div class="mt-4 flex gap-4 w-full max-w-[200px] md:hidden select-none justify-center">
+        <button id="btnLeft" class="bg-gray-800 border-2 border-gray-600 h-16 w-20 rounded-lg text-white text-2xl active:bg-gray-600 flex items-center justify-center">◀</button>
+        <button id="btnRight" class="bg-gray-800 border-2 border-gray-600 h-16 w-20 rounded-lg text-white text-2xl active:bg-gray-600 flex items-center justify-center">▶</button>
+    </div>
+
+    <script>
+        // -- CONFIGURACIÓN DEL AUDIO (Sintetizador 8-bits) --
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        let audioCtx;
+
+        function initAudio() {
+            if (!audioCtx) audioCtx = new AudioContext();
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+        }
+
+        function playTone(freq, type, duration, vol = 0.1) {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = type;
+            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + duration);
+        }
+
+        // Simular ruido de estadio y celebración
+        function playCrowd(duration, isGoal) {
+            if (!audioCtx) return;
+            const bufferSize = audioCtx.sampleRate * duration;
+            const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) {
+                data[i] = Math.random() * 2 - 1; // Ruido blanco
+            }
+            const noise = audioCtx.createBufferSource();
+            noise.buffer = buffer;
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = isGoal ? 'highpass' : 'lowpass'; // Agudo para celebración, grave para murmullo
+            filter.frequency.value = isGoal ? 1000 : 400; 
+            const gain = audioCtx.createGain();
+            gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+            gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + duration);
+            noise.connect(filter);
+            filter.connect(gain);
+            gain.connect(audioCtx.destination);
+            noise.start();
+        }
+
+        // -- VARIABLES DEL JUEGO --
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        const scoreGoals = document.getElementById('scoreGoals');
+        const scoreMisses = document.getElementById('scoreMisses');
+        const scoreRemaining = document.getElementById('scoreRemaining');
+        const overlay = document.getElementById('overlay');
+        const overlayTitle = document.getElementById('overlayTitle');
+        const overlayText = document.getElementById('overlayText');
+        const promoMessage = document.getElementById('promoMessage');
+        const startBtn = document.getElementById('startBtn');
+
+        let gameState = 'START'; // START, READY, SHOOTING, RESULT, END
+        let reqAnimation;
+        
+        let goals = 0;
+        let misses = 0;
+        let shotsTaken = 0;
+        const totalShots = 5;
+
+        // Coordenadas
+        const goalY = 80;
+        const penaltySpotY = 320;
+        const centerX = 190;
+        // AJUSTE: Movidos los objetivos hacia adentro para no pegar en el poste
+        const leftTarget = 114; // Antes 100
+        const rightTarget = 266; // Antes 280
+
+        // Entidades
+        let ball = { x: centerX, y: penaltySpotY, targetX: centerX, size: 8 };
+        let goalie = { x: centerX, y: goalY + 10, targetX: centerX };
+        let animProgress = 0; // 0 a 1
+        let shotResult = ''; // 'GOAL' o 'SAVE'
+
+        // -- SPRITES 16x16 --
+        // 0: Vacío, 1: Piel, 2: Jersey, 3: Short, 4: Pelo/Zapatos, 5: Blanco
+        const S_PLAYER = [
+            [0,0,0,0,0,0,4,4,4,4,0,0,0,0,0,0],
+            [0,0,0,0,0,4,4,4,4,4,4,0,0,0,0,0],
+            [0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0],
+            [0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0],
+            [0,0,0,0,2,2,2,2,2,2,2,2,0,0,0,0],
+            [0,0,0,2,2,2,2,2,2,2,2,2,2,0,0,0],
+            [0,0,2,2,1,2,2,2,2,2,2,1,2,2,0,0],
+            [0,0,1,1,1,2,2,2,2,2,2,1,1,1,0,0],
+            [0,0,1,1,0,3,3,3,3,3,3,0,1,1,0,0],
+            [0,0,0,0,0,3,3,3,3,3,3,0,0,0,0,0],
+            [0,0,0,0,0,3,3,0,0,3,3,0,0,0,0,0],
+            [0,0,0,0,0,1,1,0,0,1,1,0,0,0,0,0],
+            [0,0,0,0,0,1,1,0,0,1,1,0,0,0,0,0],
+            [0,0,0,0,0,5,5,0,0,5,5,0,0,0,0,0],
+            [0,0,0,0,0,4,4,0,0,4,4,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+        ];
+        // Colores Jugador: 1: Piel, 2: Jersey #e72c33, 3: Short #1d345e, 4: Negro, 5: Calcetas Blancas
+        const C_PLAYER = {1: '#ffcc99', 2: '#e72c33', 3: '#1d345e', 4: '#000000', 5: '#ffffff'};
+
+        // Portero (Jersey Amarillo, Short Negro)
+        const C_GOALIE = {1: '#ffcc99', 2: '#eab308', 3: '#000000', 4: '#1f2937', 5: '#ffffff'};
+
+        const S_BALL = [
+            [0,4,4,0],
+            [4,5,4,4],
+            [4,4,5,4],
+            [0,4,4,0]
+        ];
+        const C_BALL = {4: '#000000', 5: '#ffffff'};
+
+        function drawSprite(sprite, colors, x, y, sizeMultiplier = 2) {
+            const size = sprite.length;
+            for (let r = 0; r < size; r++) {
+                for (let c = 0; c < size; c++) {
+                    let val = sprite[r][c];
+                    if (val > 0) {
+                        ctx.fillStyle = colors[val];
+                        ctx.fillRect(x - (size*sizeMultiplier)/2 + c * sizeMultiplier, y - (size*sizeMultiplier)/2 + r * sizeMultiplier, sizeMultiplier, sizeMultiplier);
+                    }
+                }
+            }
+        }
+
+        function drawPitch() {
+            ctx.fillStyle = '#22c55e'; // Césped
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Patrón de pasto (bandas)
+            ctx.fillStyle = '#16a34a'; 
+            for(let i=0; i<canvas.height; i+=40) {
+                ctx.fillRect(0, i, canvas.width, 20);
+            }
+
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 3;
+
+            // Área grande
+            ctx.strokeRect(50, -10, 280, 150);
+            // Área chica
+            ctx.strokeRect(120, -10, 140, 60);
+            // Punto penal
+            ctx.beginPath();
+            ctx.arc(centerX, penaltySpotY, 4, 0, Math.PI * 2);
+            ctx.fillStyle = '#ffffff';
+            ctx.fill();
+            // Arco (Media luna)
+            ctx.beginPath();
+            ctx.arc(centerX, 140, 50, 0, Math.PI);
+            ctx.stroke();
+
+            // Portería
+            ctx.fillStyle = '#9ca3af'; // Red
+            for(let i=100; i<280; i+=10) {
+                ctx.fillRect(i, 20, 2, 60);
+            }
+            for(let j=20; j<80; j+=10) {
+                ctx.fillRect(100, j, 180, 2);
+            }
+            // Postes
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(96, 15, 8, 70); // Poste Izq
+            ctx.fillRect(276, 15, 8, 70); // Poste Der
+            ctx.fillRect(96, 15, 188, 8); // Travesaño
+        }
+
+        function draw() {
+            drawPitch();
+
+            // Mensajes flotantes de ayuda
+            if(gameState === 'READY') {
+                ctx.fillStyle = '#ffffff';
+                ctx.font = "bold 16px Courier New";
+                ctx.textAlign = "center";
+                ctx.fillText("◀ TIRAR IZQUIERDA     TIRAR DERECHA ▶", centerX, penaltySpotY + 50);
+                
+                // Dibujar jugador en punto penal
+                drawSprite(S_PLAYER, C_PLAYER, centerX, penaltySpotY + 20, 3);
+            } else if (gameState === 'SHOOTING' || gameState === 'RESULT') {
+                // Jugador se queda fijo animando el tiro
+                drawSprite(S_PLAYER, C_PLAYER, centerX + 10, penaltySpotY + 20, 3);
+            }
+
+            // Dibujar portero
+            drawSprite(S_PLAYER, C_GOALIE, goalie.x, goalie.y, 3);
+
+            // Dibujar balón
+            drawSprite(S_BALL, C_BALL, ball.x, ball.y, 2);
+
+            // Texto de resultado
+            if(gameState === 'RESULT') {
+                ctx.fillStyle = shotResult === 'GOAL' ? '#fbbf24' : '#ef4444';
+                ctx.font = "bold 32px Courier New";
+                ctx.textAlign = "center";
+                ctx.fillText(shotResult === 'GOAL' ? "¡GOOOL!" : "¡ATAJADA!", centerX, 200);
+            }
+        }
+
+        function update() {
+            if (gameState === 'SHOOTING') {
+                animProgress += 0.05; // Velocidad del balón
+                
+                // Interpolar posiciones
+                ball.x = centerX + (ball.targetX - centerX) * animProgress;
+                ball.y = penaltySpotY + (goalY - penaltySpotY) * animProgress;
+
+                goalie.x = centerX + (goalie.targetX - centerX) * animProgress;
+
+                if (animProgress >= 1) {
+                    gameState = 'RESULT';
+                    evaluateShot();
+                }
+            }
+        }
+
+        function evaluateShot() {
+            if (ball.targetX === goalie.targetX) {
+                // Atajada
+                shotResult = 'SAVE';
+                misses++;
+                scoreMisses.innerText = misses;
+                playTone(300, 'sawtooth', 0.2);
+                setTimeout(() => playTone(200, 'sawtooth', 0.4), 200);
+                playCrowd(1, false);
+            } else {
+                // Gol
+                shotResult = 'GOAL';
+                goals++;
+                scoreGoals.innerText = goals;
+                playTone(600, 'square', 0.1);
+                setTimeout(() => playTone(800, 'square', 0.3), 150);
+                playCrowd(1.5, true);
+            }
+
+            shotsTaken++;
+            scoreRemaining.innerText = totalShots - shotsTaken;
+
+            setTimeout(() => {
+                if (shotsTaken < totalShots) {
+                    resetRound();
+                } else {
+                    endGame();
+                }
+            }, 1500);
+        }
+
+        function loop() {
+            update();
+            draw();
+            if (gameState === 'READY' || gameState === 'SHOOTING' || gameState === 'RESULT') {
+                reqAnimation = requestAnimationFrame(loop);
+            }
+        }
+
+        function shoot(direction) {
+            if (gameState !== 'READY') return;
+            
+            initAudio(); // Inicializar audio en la interacción
+            playTone(150, 'square', 0.1); // Sonido de pateo
+
+            // Configurar tiro
+            ball.targetX = direction === 'LEFT' ? leftTarget : rightTarget;
+            
+            // IA del portero (50% de probabilidad para cada lado)
+            const goalieDive = Math.random() > 0.5 ? leftTarget : rightTarget;
+            goalie.targetX = goalieDive;
+
+            animProgress = 0;
+            gameState = 'SHOOTING';
+        }
+
+        function resetRound() {
+            ball.x = centerX;
+            ball.y = penaltySpotY;
+            goalie.x = centerX;
+            animProgress = 0;
+            gameState = 'READY';
+            playTone(1200, 'sine', 0.3); // Silbato arbitro
+        }
+
+        function endGame() {
+            gameState = 'END';
+            overlay.classList.remove('hidden');
+            
+            if (goals >= 3) { // Regla sencilla: ganar la mayoría de los 5 tiros
+                overlayTitle.innerText = "¡VICTORIA!";
+                overlayTitle.className = "text-4xl font-bold text-green-400 mb-4 text-center";
+                overlayText.innerHTML = `Marcador Final<br>Acertados: ${goals} | Fallados: ${misses}`;
+                promoMessage.innerHTML = '¡Felicidades crack, ganaste un souvenir oficial de CTR Scientific!<br><span class="text-xl text-yellow-300 bg-gray-900 px-2 py-1 rounded mt-2 inline-block border border-gray-600">Tómale screenshot a esta pantalla</span>';
+                promoMessage.classList.remove('hidden');
+                playTone(800, 'square', 0.1); setTimeout(() => playTone(1000, 'square', 0.1), 150); setTimeout(() => playTone(1200, 'square', 0.4), 300);
+            } else {
+                overlayTitle.innerText = "¡DERROTA!";
+                overlayTitle.className = "text-4xl font-bold text-red-500 mb-4 text-center";
+                overlayText.innerHTML = `El portero te superó.<br>Acertados: ${goals} | Fallados: ${misses}`;
+                promoMessage.classList.add('hidden');
+                playTone(300, 'sawtooth', 0.3); setTimeout(() => playTone(250, 'sawtooth', 0.5), 350);
+            }
+            
+            startBtn.innerText = "Jugar de nuevo";
+        }
+
+        function startGame() {
+            initAudio();
+            overlay.classList.add('hidden');
+            promoMessage.classList.add('hidden');
+            
+            goals = 0;
+            misses = 0;
+            shotsTaken = 0;
+            scoreGoals.innerText = goals;
+            scoreMisses.innerText = misses;
+            scoreRemaining.innerText = totalShots;
+            
+            resetRound();
+            loop();
+        }
+
+        startBtn.addEventListener('click', startGame);
+
+        // Controles de teclado
+        window.addEventListener('keydown', e => {
+            if (gameState !== 'READY') return;
+            if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') shoot('LEFT');
+            if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') shoot('RIGHT');
+        });
+
+        // Controles Móviles
+        const btnLeft = document.getElementById('btnLeft');
+        const btnRight = document.getElementById('btnRight');
+
+        const pressLeft = (e) => { e.preventDefault(); shoot('LEFT'); };
+        const pressRight = (e) => { e.preventDefault(); shoot('RIGHT'); };
+
+        btnLeft.addEventListener('touchstart', pressLeft); btnLeft.addEventListener('mousedown', pressLeft);
+        btnRight.addEventListener('touchstart', pressRight); btnRight.addEventListener('mousedown', pressRight);
+
+        // Renderizado inicial de fondo
+        drawPitch();
+    </script>
+</body>
+</html>
